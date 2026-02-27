@@ -5,7 +5,9 @@ export const metadata: Metadata = {
   title: "UMD Dining Tool",
   description: "Standalone UMD dining digest service.",
   icons: {
-    icon: "/favicon.ico"
+    icon: "/favicon.ico?v=3",
+    shortcut: "/favicon.ico?v=3",
+    apple: "/favicon.ico?v=3"
   }
 };
 

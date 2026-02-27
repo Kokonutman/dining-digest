@@ -1,12 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
-
-type SubscribeState = {
-  success: boolean;
-  added: boolean;
-  message: string;
-};
+import type { SubscribeState } from "@/app/subscribe-actions";
 
 const INITIAL_STATE: SubscribeState = {
   success: false,
