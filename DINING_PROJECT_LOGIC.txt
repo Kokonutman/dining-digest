@@ -1,0 +1,235 @@
+﻿DINING PROJECT - DETAILED LOGIC SPEC
+====================================
+
+Overview
+--------
+The dining project is a server-side daily digest service.
+It fetches UMD dining menu data, normalizes it, scores/filter items of interest, groups results for readability, and optionally emails a digest.
+
+Primary endpoint:
+- GET /api/dining/run
+
+Health endpoint:
+- GET /api/dining/health
+
+The service is intended to run automatically on a daily Vercel Cron schedule and also supports manual testing.
+
+
+High-Level Workflow
+-------------------
+1) Authenticate request to /api/dining/run.
+2) Parse run options (dryRun, debug, force, date override).
+3) Apply recent-run lock (5-minute anti-spam lock unless force=1).
+4) Fetch menu records from configured sources.
+5) Normalize/deduplicate records into a consistent schema.
+6) Load prior item history (if state backend available).
+7) Evaluate which items are interesting.
+8) Group interesting items by item name and locations.
+9) Compute digest hash and skip duplicate digest emails for same date.
+10) Send email (unless dryRun or skip conditions).
+11) Update state (lastRunAt, item history, digest hash).
+12) Return structured JSON with stats, warnings, errors.
+
+
+API Contract
+------------
+GET /api/dining/run
+
+Auth:
+- Requires Authorization header with Bearer token.
+- Token must match one of:
+  - DINING_CRON_SECRET
+  - CRON_SECRET
+
+Query params:
+- dryRun=1   -> no email sent
+- debug=1    -> include normalized records in response
+- force=1    -> bypass recent-run lock
+- date=YYYY-MM-DD -> override date for testing
+
+Response shape:
+- metadata: timestamp/dateProcessed/durationMs
+- stats: hallsCount/totalRecords/interestingCount
+- interestingItems: grouped digest payload
+- emailSent: boolean
+- warnings: string[]
+- errors: string[]
+- debug object when requested
+
+GET /api/dining/health
+- Returns status + lastRunAt
+- Used to confirm service readiness/state activity
+
+
+Data Sources and Fetching
+-------------------------
+Fetcher module attempts to collect menus from configurable and fallback sources.
+
+Environment-driven source options include:
+- DINING_JSON_ENDPOINT
+- DINING_SOURCE_BASE_URL
+- DINING_SPECIALS_URL
+- DINING_MEALS
+
+Specials handling:
+- Specials are parsed and injected as records.
+- Specials are marked to be always included as interesting items.
+
+Failure behavior:
+- Partial source failure does not hard-fail the run.
+- Warnings/errors are accumulated and returned in response.
+
+
+Normalization Rules
+-------------------
+Raw records are normalized into MenuRecord:
+- date: YYYY-MM-DD
+- hall
+- meal
+- station (optional)
+- item
+- tags (optional)
+- raw (optional original payload)
+
+Normalization tasks:
+- trim whitespace
+- collapse repeated spaces
+- remove noisy unicode/control artifacts
+- handle missing meal/station gracefully
+- deduplicate equivalent records
+
+If upstream format drifts, normalize step should degrade gracefully with warnings.
+
+
+Interesting Item Evaluation
+---------------------------
+The rules engine scores records and tags novelty.
+
+Inputs:
+- normalized records
+- prior item history
+- date
+
+Default include seed list:
+- from data/dining-liked-items.ts
+
+Configurable parameters via env:
+- DINING_INCLUDE_KEYWORDS (CSV override)
+- DINING_SCORE_THRESHOLD
+- DINING_NOVELTY_DAYS
+
+Current behavior notes:
+- Exclusion logic was intentionally removed.
+- Specials are always included.
+- Liked items and keyword scoring determine baseline interest.
+
+Novelty:
+- Uses history map (item -> lastSeen/count)
+- Novel item windows can be promoted via noveltyDays threshold
+
+
+Grouping for Digest
+-------------------
+Interesting records are grouped by item name, then locations are aggregated:
+- Hall
+- Meal
+- Station (included when present)
+
+Sorting priority:
+1) higher score first
+2) alphabetical fallback
+
+This produces a compact digest list where each item can appear at multiple hall/meal/station combinations.
+
+
+Email Delivery
+--------------
+Delivery transport:
+- Resend API
+
+Required Resend env:
+- RESEND_API_KEY
+
+Digest addressing env:
+- DINING_EMAIL_TO
+- DINING_EMAIL_FROM
+
+Email behavior:
+- dryRun disables sending
+- duplicate digest for same date is skipped
+- if no records, email is skipped
+- response reports emailSent plus warnings/errors
+
+Email content includes:
+- date-based subject
+- grouped interesting items
+- specials emphasis
+- meal organization
+- station details when available (no fake placeholders)
+
+
+State and Anti-Spam
+-------------------
+State module stores:
+- lastRunAt
+- item history
+- digest hash per date
+
+Backends:
+- prefers KV/Upstash when configured
+- falls back to state-disabled mode when unavailable
+
+Anti-spam controls:
+1) recent-run lock:
+   - blocks runs within 5 minutes unless force=1
+2) digest hash dedupe:
+   - if grouped output hash unchanged for same date, no new email
+
+State-disabled mode:
+- service can still run and score items
+- novelty/dedupe may be limited
+- warnings indicate reduced state capabilities
+
+
+Cron Behavior
+-------------
+Cron is configured in dining/vercel.json and calls:
+- /api/dining/run
+
+Schedule used currently:
+- 0 11 * * * (11:00 UTC)
+
+At execution time:
+- Vercel sends Authorization using CRON_SECRET
+- Route validates token and performs normal run workflow
+
+
+Security Notes
+--------------
+- Secret validation occurs server-side only.
+- Do not expose CRON/Resend secrets client-side.
+- Use environment variables in deployment platform.
+- Rotate CRON_SECRET if leaked.
+
+
+Operational Testing
+-------------------
+Manual dry run:
+- call /api/dining/run?dryRun=1&debug=1 with Bearer token
+
+Manual real run:
+- call /api/dining/run?debug=1 with Bearer token
+
+Expected checks:
+- auth accepted
+- records fetched > 0
+- interesting items grouped
+- emailSent true (for real run with valid Resend credentials)
+- lastRunAt updated
+
+
+Summary
+-------
+The dining service is a resilient scheduled pipeline:
+fetch -> normalize -> evaluate -> group -> dedupe -> email -> persist state.
+It is optimized for reliable daily operation, safe retries, and clear observability via structured JSON responses.
