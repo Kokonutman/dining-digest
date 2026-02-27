@@ -3,7 +3,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "UMD Dining Tool",
-  description: "Standalone UMD dining digest service."
+  description: "Standalone UMD dining digest service.",
+  icons: {
+    icon: "/favicon.ico"
+  }
 };
 
 export default function RootLayout({
