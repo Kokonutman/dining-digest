@@ -9,8 +9,14 @@ type StateResult<T> = {
 const KEY_LAST_RUN_AT = "dining:lastRunAt";
 const KEY_ITEM_HISTORY = "dining:itemHistory";
 const KEY_DIGEST_PREFIX = "dining:digest:";
+const KEY_SUBSCRIBERS = "dining:subscribers";
 
 let memoryLastRunAt: string | null = null;
+const memorySubscribers = new Set<string>();
+
+function uniqueSubscribers(input: string[]): string[] {
+  return Array.from(new Set(input.map((value) => value.trim().toLowerCase()).filter(Boolean)));
+}
 
 function getRedisClient(): Redis | null {
   const url = process.env.KV_REST_API_URL;
@@ -111,5 +117,69 @@ export async function setDigestHashForDate(date: string, digestHash: string): Pr
     return [];
   } catch {
     return ["STATE_DIGEST_WRITE_FAILED"];
+  }
+}
+
+export async function addMailingListSubscriber(email: string): Promise<StateResult<boolean>> {
+  const normalized = email.trim().toLowerCase();
+  const redis = getRedisClient();
+  if (!redis) {
+    const alreadyExists = memorySubscribers.has(normalized);
+    if (!alreadyExists) {
+      memorySubscribers.add(normalized);
+    }
+    return { value: !alreadyExists, warnings: ["STATE_DISABLED"] };
+  }
+
+  try {
+    const existing = uniqueSubscribers((await redis.get<string[]>(KEY_SUBSCRIBERS)) ?? []);
+    const alreadyExists = existing.includes(normalized);
+    if (!alreadyExists) {
+      existing.push(normalized);
+      await redis.set(KEY_SUBSCRIBERS, existing);
+    }
+    return { value: !alreadyExists, warnings: [] };
+  } catch {
+    const alreadyExists = memorySubscribers.has(normalized);
+    if (!alreadyExists) {
+      memorySubscribers.add(normalized);
+    }
+    return { value: !alreadyExists, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
+  }
+}
+
+export async function getMailingListSubscribers(): Promise<StateResult<string[]>> {
+  const redis = getRedisClient();
+  if (!redis) {
+    return { value: [...memorySubscribers], warnings: ["STATE_DISABLED"] };
+  }
+
+  try {
+    const existing = uniqueSubscribers((await redis.get<string[]>(KEY_SUBSCRIBERS)) ?? []);
+    return { value: existing, warnings: [] };
+  } catch {
+    return { value: [...memorySubscribers], warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
+  }
+}
+
+export async function removeMailingListSubscriber(email: string): Promise<StateResult<boolean>> {
+  const normalized = email.trim().toLowerCase();
+  const redis = getRedisClient();
+  if (!redis) {
+    const existed = memorySubscribers.delete(normalized);
+    return { value: existed, warnings: ["STATE_DISABLED"] };
+  }
+
+  try {
+    const existing = uniqueSubscribers((await redis.get<string[]>(KEY_SUBSCRIBERS)) ?? []);
+    const next = existing.filter((entry) => entry !== normalized);
+    const existed = next.length !== existing.length;
+    if (existed) {
+      await redis.set(KEY_SUBSCRIBERS, next);
+    }
+    return { value: existed, warnings: [] };
+  } catch {
+    const existed = memorySubscribers.delete(normalized);
+    return { value: existed, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
   }
 }

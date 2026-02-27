@@ -1,4 +1,6 @@
 import { GroupedInterestingItem } from "@/lib/dining/types";
+import { getMailingListSubscribers } from "@/lib/dining/state";
+import { getPublicBaseUrl, makeUnsubscribeToken } from "@/lib/dining/subscribers";
 
 type EmailBuildResult = {
   subject: string;
@@ -34,6 +36,7 @@ function buildDigestEmail(params: {
   date: string;
   generatedAtIso: string;
   items: GroupedInterestingItem[];
+  unsubscribeUrl?: string;
 }): EmailBuildResult {
   const subject = `UMD Dining picks for ${formatSubjectDate(params.date)}`;
   const mealGroups = buildMealGroups(params.items);
@@ -59,6 +62,10 @@ function buildDigestEmail(params: {
   }
 
   lines.push(`Generated at ${params.generatedAtIso}`);
+  if (params.unsubscribeUrl) {
+    lines.push("");
+    lines.push(`Unsubscribe: ${params.unsubscribeUrl}`);
+  }
 
   const htmlItems = mealGroups.length
     ? mealGroups
@@ -104,6 +111,11 @@ function buildDigestEmail(params: {
         ${htmlItems}
         <hr style="border:none;border-top:1px solid #1e293b;margin:18px 0;" />
         <p style="margin:0;color:#94a3b8;font-size:12px;">Generated at ${escapeHtml(params.generatedAtIso)}</p>
+        ${
+          params.unsubscribeUrl
+            ? `<p style="margin:10px 0 0;color:#94a3b8;font-size:12px;">Not interested anymore? <a href="${escapeHtml(params.unsubscribeUrl)}" style="color:#7fe6ff;">Unsubscribe</a></p>`
+            : ""
+        }
         </div>
       </div>
     </div>
@@ -119,7 +131,7 @@ function buildDigestEmail(params: {
 function parseRecipients(raw: string): string[] {
   return raw
     .split(",")
-    .map((entry) => entry.trim())
+    .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
 }
 
@@ -143,7 +155,7 @@ async function sendViaResend(params: {
     },
     body: JSON.stringify({
       from: params.from,
-      to: parseRecipients(params.to),
+      to: [params.to],
       subject: params.subject,
       text: params.text,
       html: params.html
@@ -168,15 +180,30 @@ export async function sendDigestEmail(params: SendDigestParams): Promise<SendDig
   const warnings: string[] = [];
   const errors: string[] = [];
 
-  const to = process.env.DINING_EMAIL_TO;
+  const to = process.env.DINING_EMAIL_TO ?? "";
   const from = process.env.DINING_EMAIL_FROM;
+  const subscribersRes = await getMailingListSubscribers();
+  warnings.push(...subscribersRes.warnings);
 
-  if (!to || !from) {
+  if (!from) {
     return {
       emailSent: false,
       provider: null,
       warnings,
-      errors: ["EMAIL_ENV_MISSING_TO_OR_FROM"]
+      errors: ["EMAIL_ENV_MISSING_FROM"]
+    };
+  }
+
+  const recipients = Array.from(
+    new Set([...parseRecipients(to), ...subscribersRes.value.map((entry) => entry.trim().toLowerCase())])
+  );
+
+  if (!recipients.length) {
+    return {
+      emailSent: false,
+      provider: null,
+      warnings,
+      errors: ["EMAIL_NO_RECIPIENTS"]
     };
   }
 
@@ -189,29 +216,47 @@ export async function sendDigestEmail(params: SendDigestParams): Promise<SendDig
     };
   }
 
-  const { subject, text, html } = buildDigestEmail({
-    date: params.date,
-    generatedAtIso: params.generatedAtIso,
-    items: params.items
-  });
-
-  try {
-    await sendViaResend({ to, from, subject, text, html });
-    return {
-      emailSent: true,
-      provider: "resend",
-      warnings,
-      errors
-    };
-  } catch {
-    errors.push("EMAIL_SEND_FAILED_RESEND");
-    return {
-      emailSent: false,
-      provider: null,
-      warnings,
-      errors
-    };
+  const baseUrl = getPublicBaseUrl();
+  if (!baseUrl) {
+    warnings.push("UNSUBSCRIBE_BASE_URL_MISSING");
   }
+
+  let sentCount = 0;
+  for (const recipient of recipients) {
+    const token = makeUnsubscribeToken(recipient);
+    if (!token) {
+      warnings.push("UNSUBSCRIBE_SECRET_MISSING");
+    }
+    const unsubscribeUrl =
+      baseUrl && token
+        ? `${baseUrl}/unsubscribe?email=${encodeURIComponent(recipient)}&token=${encodeURIComponent(token)}`
+        : undefined;
+
+    const { subject, text, html } = buildDigestEmail({
+      date: params.date,
+      generatedAtIso: params.generatedAtIso,
+      items: params.items,
+      unsubscribeUrl
+    });
+
+    try {
+      await sendViaResend({ to: recipient, from, subject, text, html });
+      sentCount += 1;
+    } catch {
+      errors.push(`EMAIL_SEND_FAILED_RESEND:${recipient}`);
+    }
+  }
+
+  if (sentCount > 0 && sentCount < recipients.length) {
+    warnings.push("EMAIL_PARTIAL_SEND");
+  }
+
+  return {
+    emailSent: sentCount > 0,
+    provider: sentCount > 0 ? "resend" : null,
+    warnings: Array.from(new Set(warnings)),
+    errors: Array.from(new Set(errors))
+  };
 }
 
 function escapeHtml(input: string): string {

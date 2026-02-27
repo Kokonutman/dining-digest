@@ -12,6 +12,13 @@ Primary endpoint:
 Health endpoint:
 - GET /api/dining/health
 
+Manual test endpoint:
+- POST /api/dining/test-email
+
+Signup UI:
+- Home page includes a mailing list signup form.
+- Users can unsubscribe through a signed link included in digest emails.
+
 The service is intended to run automatically on a daily Vercel Cron schedule and also supports manual testing.
 
 
@@ -57,8 +64,21 @@ Response shape:
 - debug object when requested
 
 GET /api/dining/health
-- Returns status + lastRunAt
+- Returns status/service/timestamp
 - Used to confirm service readiness/state activity
+
+POST /api/dining/test-email
+- Protected test trigger for digest email delivery.
+- Requires Authorization Bearer token matching DINING_TEST_EMAIL_SECRET.
+- Supports query params:
+  - dryRun=1 (render pipeline but do not send)
+  - debug=1 (include normalized/grouped debug payload)
+  - date=YYYY-MM-DD (optional date override)
+
+Mailing list signup
+- Implemented via home page UI form + server action.
+- Adds email to subscriber state store and returns inline success/error feedback.
+- Unsubscribe is handled by GET /unsubscribe?email=...&token=... with token validation.
 
 
 Data Sources and Fetching
@@ -174,6 +194,7 @@ State module stores:
 - lastRunAt
 - item history
 - digest hash per date
+- mailing list subscribers
 
 Backends:
 - prefers KV/Upstash when configured
@@ -210,6 +231,7 @@ Security Notes
 - Do not expose CRON/Resend secrets client-side.
 - Use environment variables in deployment platform.
 - Rotate CRON_SECRET if leaked.
+- Protect /api/dining/test-email with DINING_TEST_EMAIL_SECRET.
 
 
 Operational Testing
