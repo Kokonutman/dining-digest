@@ -128,13 +128,6 @@ function buildDigestEmail(params: {
   };
 }
 
-function parseRecipients(raw: string): string[] {
-  return raw
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 async function sendViaResend(params: {
   to: string;
   from: string;
@@ -180,7 +173,6 @@ export async function sendDigestEmail(params: SendDigestParams): Promise<SendDig
   const warnings: string[] = [];
   const errors: string[] = [];
 
-  const to = process.env.DINING_EMAIL_TO ?? "";
   const from = process.env.DINING_EMAIL_FROM;
   const subscribersRes = await getMailingListSubscribers();
   warnings.push(...subscribersRes.warnings);
@@ -195,7 +187,7 @@ export async function sendDigestEmail(params: SendDigestParams): Promise<SendDig
   }
 
   const recipients = Array.from(
-    new Set([...parseRecipients(to), ...subscribersRes.value.map((entry) => entry.trim().toLowerCase())])
+    new Set(subscribersRes.value.map((entry) => entry.trim().toLowerCase()))
   );
 
   if (!recipients.length) {

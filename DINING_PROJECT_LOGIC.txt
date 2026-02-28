@@ -171,13 +171,13 @@ Required Resend env:
 - RESEND_API_KEY
 
 Digest addressing env:
-- DINING_EMAIL_TO
 - DINING_EMAIL_FROM
 
 Email behavior:
 - dryRun disables sending
 - duplicate digest for same date is skipped
 - if no records, email is skipped
+- recipients come from Supabase mailing list subscribers only
 - response reports emailSent plus warnings/errors
 
 Email content includes:

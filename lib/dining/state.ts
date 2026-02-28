@@ -1,4 +1,5 @@
 import { Redis } from "@upstash/redis";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { ItemHistoryMap } from "@/lib/dining/types";
 
 type StateResult<T> = {
@@ -46,19 +47,16 @@ function getSupabaseConfig(): SupabaseConfig | null {
   };
 }
 
-async function supabaseRequest(pathAndQuery: string, init: RequestInit): Promise<Response> {
+function getSupabaseClient(): SupabaseClient | null {
   const config = getSupabaseConfig();
   if (!config) {
-    throw new Error("SUPABASE_NOT_CONFIGURED");
+    return null;
   }
 
-  return fetch(`${config.url}/rest/v1/${pathAndQuery}`, {
-    ...init,
-    headers: {
-      apikey: config.serviceRoleKey,
-      Authorization: `Bearer ${config.serviceRoleKey}`,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {})
+  return createClient(config.url, config.serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false
     }
   });
 }
@@ -156,32 +154,27 @@ export async function setDigestHashForDate(date: string, digestHash: string): Pr
 
 export async function addMailingListSubscriber(email: string): Promise<StateResult<boolean>> {
   const normalized = email.trim().toLowerCase();
-  if (!getSupabaseConfig()) {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
     return { value: false, warnings: ["SUBSCRIBERS_DISABLED"] };
   }
 
   try {
-    const existingResponse = await supabaseRequest(
-      `dining_subscribers?select=email&email=eq.${encodeURIComponent(normalized)}`,
-      { method: "GET", cache: "no-store" }
-    );
-    if (!existingResponse.ok) {
+    const { data: existing, error: readError } = await supabase
+      .from("dining_subscribers")
+      .select("email")
+      .eq("email", normalized)
+      .limit(1);
+    if (readError) {
       return { value: false, warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
     }
 
-    const existing = ((await existingResponse.json()) as Array<{ email: string }>).map(
-      (entry) => entry.email
-    );
-    const alreadyExists = existing.includes(normalized);
+    const alreadyExists = (existing ?? []).some((entry) => entry.email === normalized);
     if (!alreadyExists) {
-      const insertResponse = await supabaseRequest("dining_subscribers", {
-        method: "POST",
-        headers: {
-          Prefer: "return=minimal"
-        },
-        body: JSON.stringify({ email: normalized })
-      });
-      if (!insertResponse.ok) {
+      const { error: insertError } = await supabase
+        .from("dining_subscribers")
+        .insert({ email: normalized });
+      if (insertError) {
         return { value: false, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
       }
     }
@@ -193,22 +186,21 @@ export async function addMailingListSubscriber(email: string): Promise<StateResu
 }
 
 export async function getMailingListSubscribers(): Promise<StateResult<string[]>> {
-  if (!getSupabaseConfig()) {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
     return { value: [], warnings: ["SUBSCRIBERS_DISABLED"] };
   }
 
   try {
-    const response = await supabaseRequest("dining_subscribers?select=email&order=created_at.asc", {
-      method: "GET",
-      cache: "no-store"
-    });
-    if (!response.ok) {
+    const { data, error } = await supabase
+      .from("dining_subscribers")
+      .select("email")
+      .order("created_at", { ascending: true });
+    if (error) {
       return { value: [], warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
     }
 
-    const existing = uniqueSubscribers(
-      ((await response.json()) as Array<{ email: string }>).map((entry) => entry.email)
-    );
+    const existing = uniqueSubscribers((data ?? []).map((entry) => entry.email));
     return { value: existing, warnings: [] };
   } catch {
     return { value: [], warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
@@ -217,34 +209,28 @@ export async function getMailingListSubscribers(): Promise<StateResult<string[]>
 
 export async function removeMailingListSubscriber(email: string): Promise<StateResult<boolean>> {
   const normalized = email.trim().toLowerCase();
-  if (!getSupabaseConfig()) {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
     return { value: false, warnings: ["SUBSCRIBERS_DISABLED"] };
   }
 
   try {
-    const existingResponse = await supabaseRequest(
-      `dining_subscribers?select=email&email=eq.${encodeURIComponent(normalized)}`,
-      { method: "GET", cache: "no-store" }
-    );
-    if (!existingResponse.ok) {
+    const { data: existing, error: readError } = await supabase
+      .from("dining_subscribers")
+      .select("email")
+      .eq("email", normalized)
+      .limit(1);
+    if (readError) {
       return { value: false, warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
     }
 
-    const existing = ((await existingResponse.json()) as Array<{ email: string }>).map(
-      (entry) => entry.email
-    );
-    const existed = existing.includes(normalized);
+    const existed = (existing ?? []).some((entry) => entry.email === normalized);
     if (existed) {
-      const deleteResponse = await supabaseRequest(
-        `dining_subscribers?email=eq.${encodeURIComponent(normalized)}`,
-        {
-          method: "DELETE",
-          headers: {
-            Prefer: "return=minimal"
-          }
-        }
-      );
-      if (!deleteResponse.ok) {
+      const { error: deleteError } = await supabase
+        .from("dining_subscribers")
+        .delete()
+        .eq("email", normalized);
+      if (deleteError) {
         return { value: false, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
       }
     }
