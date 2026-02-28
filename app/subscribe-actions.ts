@@ -25,6 +25,15 @@ export async function subscribeAction(
   }
 
   const result = await addMailingListSubscriber(email);
+  const stateUnavailable = result.warnings.includes("SUBSCRIBERS_DISABLED");
+  if (stateUnavailable) {
+    return {
+      success: false,
+      added: false,
+      message: "Signups are temporarily unavailable."
+    };
+  }
+
   if (result.warnings.some((warning) => warning.endsWith("_FAILED"))) {
     return {
       success: false,

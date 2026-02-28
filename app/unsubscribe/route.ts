@@ -49,6 +49,13 @@ export async function GET(request: NextRequest) {
   }
 
   const result = await removeMailingListSubscriber(email);
+  if (result.warnings.includes("SUBSCRIBERS_DISABLED")) {
+    return new Response(pageHtml("Unsubscribe unavailable", "Unsubscribe is temporarily unavailable."), {
+      status: 503,
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+    });
+  }
+
   const writeFailed = result.warnings.some((warning) => warning.endsWith("_FAILED"));
   if (writeFailed) {
     return new Response(pageHtml("Unable to unsubscribe", "Please try again later."), {

@@ -9,14 +9,17 @@ type StateResult<T> = {
 const KEY_LAST_RUN_AT = "dining:lastRunAt";
 const KEY_ITEM_HISTORY = "dining:itemHistory";
 const KEY_DIGEST_PREFIX = "dining:digest:";
-const KEY_SUBSCRIBERS = "dining:subscribers";
 
 let memoryLastRunAt: string | null = null;
-const memorySubscribers = new Set<string>();
 
 function uniqueSubscribers(input: string[]): string[] {
   return Array.from(new Set(input.map((value) => value.trim().toLowerCase()).filter(Boolean)));
 }
+
+type SupabaseConfig = {
+  url: string;
+  serviceRoleKey: string;
+};
 
 function getRedisClient(): Redis | null {
   const url = process.env.KV_REST_API_URL;
@@ -27,6 +30,37 @@ function getRedisClient(): Redis | null {
   }
 
   return Redis.fromEnv();
+}
+
+function getSupabaseConfig(): SupabaseConfig | null {
+  const url = process.env.SUPABASE_URL?.trim();
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+
+  if (!url || !serviceRoleKey) {
+    return null;
+  }
+
+  return {
+    url: url.replace(/\/+$/, ""),
+    serviceRoleKey
+  };
+}
+
+async function supabaseRequest(pathAndQuery: string, init: RequestInit): Promise<Response> {
+  const config = getSupabaseConfig();
+  if (!config) {
+    throw new Error("SUPABASE_NOT_CONFIGURED");
+  }
+
+  return fetch(`${config.url}/rest/v1/${pathAndQuery}`, {
+    ...init,
+    headers: {
+      apikey: config.serviceRoleKey,
+      Authorization: `Bearer ${config.serviceRoleKey}`,
+      "Content-Type": "application/json",
+      ...(init.headers ?? {})
+    }
+  });
 }
 
 export async function getLastRunAt(): Promise<StateResult<string | null>> {
@@ -122,64 +156,101 @@ export async function setDigestHashForDate(date: string, digestHash: string): Pr
 
 export async function addMailingListSubscriber(email: string): Promise<StateResult<boolean>> {
   const normalized = email.trim().toLowerCase();
-  const redis = getRedisClient();
-  if (!redis) {
-    const alreadyExists = memorySubscribers.has(normalized);
-    if (!alreadyExists) {
-      memorySubscribers.add(normalized);
-    }
-    return { value: !alreadyExists, warnings: ["STATE_DISABLED"] };
+  if (!getSupabaseConfig()) {
+    return { value: false, warnings: ["SUBSCRIBERS_DISABLED"] };
   }
 
   try {
-    const existing = uniqueSubscribers((await redis.get<string[]>(KEY_SUBSCRIBERS)) ?? []);
+    const existingResponse = await supabaseRequest(
+      `dining_subscribers?select=email&email=eq.${encodeURIComponent(normalized)}`,
+      { method: "GET", cache: "no-store" }
+    );
+    if (!existingResponse.ok) {
+      return { value: false, warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
+    }
+
+    const existing = ((await existingResponse.json()) as Array<{ email: string }>).map(
+      (entry) => entry.email
+    );
     const alreadyExists = existing.includes(normalized);
     if (!alreadyExists) {
-      existing.push(normalized);
-      await redis.set(KEY_SUBSCRIBERS, existing);
+      const insertResponse = await supabaseRequest("dining_subscribers", {
+        method: "POST",
+        headers: {
+          Prefer: "return=minimal"
+        },
+        body: JSON.stringify({ email: normalized })
+      });
+      if (!insertResponse.ok) {
+        return { value: false, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
+      }
     }
+
     return { value: !alreadyExists, warnings: [] };
   } catch {
-    const alreadyExists = memorySubscribers.has(normalized);
-    if (!alreadyExists) {
-      memorySubscribers.add(normalized);
-    }
-    return { value: !alreadyExists, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
+    return { value: false, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
   }
 }
 
 export async function getMailingListSubscribers(): Promise<StateResult<string[]>> {
-  const redis = getRedisClient();
-  if (!redis) {
-    return { value: [...memorySubscribers], warnings: ["STATE_DISABLED"] };
+  if (!getSupabaseConfig()) {
+    return { value: [], warnings: ["SUBSCRIBERS_DISABLED"] };
   }
 
   try {
-    const existing = uniqueSubscribers((await redis.get<string[]>(KEY_SUBSCRIBERS)) ?? []);
+    const response = await supabaseRequest("dining_subscribers?select=email&order=created_at.asc", {
+      method: "GET",
+      cache: "no-store"
+    });
+    if (!response.ok) {
+      return { value: [], warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
+    }
+
+    const existing = uniqueSubscribers(
+      ((await response.json()) as Array<{ email: string }>).map((entry) => entry.email)
+    );
     return { value: existing, warnings: [] };
   } catch {
-    return { value: [...memorySubscribers], warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
+    return { value: [], warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
   }
 }
 
 export async function removeMailingListSubscriber(email: string): Promise<StateResult<boolean>> {
   const normalized = email.trim().toLowerCase();
-  const redis = getRedisClient();
-  if (!redis) {
-    const existed = memorySubscribers.delete(normalized);
-    return { value: existed, warnings: ["STATE_DISABLED"] };
+  if (!getSupabaseConfig()) {
+    return { value: false, warnings: ["SUBSCRIBERS_DISABLED"] };
   }
 
   try {
-    const existing = uniqueSubscribers((await redis.get<string[]>(KEY_SUBSCRIBERS)) ?? []);
-    const next = existing.filter((entry) => entry !== normalized);
-    const existed = next.length !== existing.length;
-    if (existed) {
-      await redis.set(KEY_SUBSCRIBERS, next);
+    const existingResponse = await supabaseRequest(
+      `dining_subscribers?select=email&email=eq.${encodeURIComponent(normalized)}`,
+      { method: "GET", cache: "no-store" }
+    );
+    if (!existingResponse.ok) {
+      return { value: false, warnings: ["STATE_SUBSCRIBERS_READ_FAILED"] };
     }
+
+    const existing = ((await existingResponse.json()) as Array<{ email: string }>).map(
+      (entry) => entry.email
+    );
+    const existed = existing.includes(normalized);
+    if (existed) {
+      const deleteResponse = await supabaseRequest(
+        `dining_subscribers?email=eq.${encodeURIComponent(normalized)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Prefer: "return=minimal"
+          }
+        }
+      );
+      if (!deleteResponse.ok) {
+        return { value: false, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
+      }
+    }
+
     return { value: existed, warnings: [] };
   } catch {
-    const existed = memorySubscribers.delete(normalized);
-    return { value: existed, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
+    return { value: false, warnings: ["STATE_SUBSCRIBERS_WRITE_FAILED"] };
   }
 }

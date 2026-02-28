@@ -199,6 +199,7 @@ State module stores:
 Backends:
 - prefers KV/Upstash when configured
 - falls back to state-disabled mode when unavailable
+- mailing list subscribers are stored in Supabase (`public.dining_subscribers`)
 
 Anti-spam controls:
 1) recent-run lock:
@@ -210,6 +211,7 @@ State-disabled mode:
 - service can still run and score items
 - novelty/dedupe may be limited
 - warnings indicate reduced state capabilities
+- subscriber signup/unsubscribe is unavailable if Supabase env is missing
 
 
 Cron Behavior
