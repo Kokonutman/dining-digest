@@ -22,6 +22,18 @@ type SendDigestResult = {
   errors: string[];
 };
 
+type ResendSendError = Error & {
+  status?: number;
+};
+
+type BatchEmailPayload = {
+  from: string;
+  to: string[];
+  subject: string;
+  text: string;
+  html: string;
+};
+
 function formatSubjectDate(date: string): string {
   const parsed = new Date(`${date}T00:00:00Z`);
   return new Intl.DateTimeFormat("en-US", {
@@ -128,45 +140,65 @@ function buildDigestEmail(params: {
   };
 }
 
-async function sendViaResend(params: {
-  to: string;
-  from: string;
-  subject: string;
-  text: string;
-  html: string;
-}): Promise<void> {
+function chunkArray<T>(input: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < input.length; index += size) {
+    chunks.push(input.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function sendBatchViaResend(messages: BatchEmailPayload[]): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     throw new Error("RESEND_API_KEY_MISSING");
   }
 
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      from: params.from,
-      to: [params.to],
-      subject: params.subject,
-      text: params.text,
-      html: params.html
-    })
-  });
+  const requestBody = JSON.stringify(messages);
 
-  if (!response.ok) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch("https://api.resend.com/emails/batch", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: requestBody
+    });
+
+    if (response.ok) {
+      return;
+    }
+
     let detail = "";
     try {
       const payload = (await response.json()) as { message?: string };
       if (payload?.message) {
-        detail = `:${payload.message}`;
+        detail = payload.message;
       }
     } catch {
       // ignore parsing errors to preserve base status
     }
-    throw new Error(`RESEND_SEND_FAILED_${response.status}${detail}`);
+
+    const shouldRetry = response.status === 429 || response.status >= 500;
+    if (shouldRetry && attempt < 2) {
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfterSeconds = retryAfterHeader ? Number.parseInt(retryAfterHeader, 10) : NaN;
+      const retryDelayMs = Number.isFinite(retryAfterSeconds)
+        ? retryAfterSeconds * 1000
+        : (attempt + 1) * 1500;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      continue;
+    }
+
+    const error = new Error(
+      detail ? `RESEND_SEND_FAILED_${response.status}:${detail}` : `RESEND_SEND_FAILED_${response.status}`
+    ) as ResendSendError;
+    error.status = response.status;
+    throw error;
   }
+
+  throw new Error("RESEND_SEND_FAILED_UNKNOWN");
 }
 
 export async function sendDigestEmail(params: SendDigestParams): Promise<SendDigestResult> {
@@ -213,8 +245,7 @@ export async function sendDigestEmail(params: SendDigestParams): Promise<SendDig
     warnings.push("UNSUBSCRIBE_BASE_URL_MISSING");
   }
 
-  let sentCount = 0;
-  for (const recipient of recipients) {
+  const messages: BatchEmailPayload[] = recipients.map((recipient) => {
     const token = makeUnsubscribeToken(recipient);
     if (!token) {
       warnings.push("UNSUBSCRIBE_SECRET_MISSING");
@@ -231,11 +262,28 @@ export async function sendDigestEmail(params: SendDigestParams): Promise<SendDig
       unsubscribeUrl
     });
 
+    return {
+      from,
+      to: [recipient],
+      subject,
+      text,
+      html
+    };
+  });
+
+  let sentCount = 0;
+  const messageBatches = chunkArray(messages, 100);
+  for (const batch of messageBatches) {
     try {
-      await sendViaResend({ to: recipient, from, subject, text, html });
-      sentCount += 1;
-    } catch {
-      errors.push(`EMAIL_SEND_FAILED_RESEND:${recipient}`);
+      await sendBatchViaResend(batch);
+      sentCount += batch.length;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "UNKNOWN";
+      errors.push(`EMAIL_SEND_FAILED_RESEND_BATCH:${detail}`);
+      console.error("[dining.email.send_failed]", {
+        batchSize: batch.length,
+        detail
+      });
     }
   }
 
